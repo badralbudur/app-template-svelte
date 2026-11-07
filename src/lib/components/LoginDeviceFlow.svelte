@@ -11,11 +11,16 @@
     logoSrc = appConfig.logoSrc
   } = $props();
 
+  /** @type {Awaited<ReturnType<typeof user.startLogin>> | null} */
   let verificationInfo = $state(null);
   let polling = $state(false);
+  let starting = $state(false);
+  /** @type {string | null} */
   let error = $state(null);
 
   async function startLogin() {
+    if (starting || polling) return;
+    starting = true;
     // Open the popup synchronously within the click gesture. Safari only permits
     // window.open() in the same call stack as the user gesture; opening it after
     // an await gets blocked. We hand the window to user.startLogin(), which
@@ -30,6 +35,7 @@
     try {
       error = null;
       verificationInfo = await user.startLogin(popup);
+      starting = false;
 
       // Start polling for token
       polling = true;
@@ -48,7 +54,8 @@
       if (popup && !popup.closed) {
         popup.close();
       }
-      error = err.message;
+      starting = false;
+      error = err instanceof Error ? err.message : 'Unable to sign in';
       polling = false;
       verificationInfo = null;
     }
@@ -127,10 +134,12 @@
           <div class="flex flex-col gap-2.5">
             <button
               class="btn h-12 w-full rounded-lg bg-fulcra-teal/20 text-[14.5px] font-medium text-fulcra-teal transition-colors hover:bg-fulcra-teal/50 hover:text-fulcra-black"
+              disabled={starting}
               on:click={startLogin}>Sign In</button
             >
             <button
               class="btn h-12 w-full rounded-lg border border-solid border-fulcra-black-25 bg-transparent text-[14.5px] font-normal text-fulcra-white transition-colors hover:border-fulcra-black-20 hover:bg-fulcra-black-50"
+              disabled={starting}
               on:click={startLogin}>Create Account</button
             >
           </div>

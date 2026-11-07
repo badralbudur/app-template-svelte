@@ -65,8 +65,7 @@ it.each([null, JSON.stringify({ auth0UserInfo: profile, fulcraUserInfo: {} })])(
     const check = deferred();
     const info = deferred();
     const fetcher = vi.fn((url) => {
-      if (url === '/api/auth/check') return check.promise;
-      if (url === '/api/auth/user') return Promise.resolve(response(profile));
+      if (url === '/api/auth/user') return check.promise;
       if (url === '/api/user/info') return info.promise;
       throw new Error(`Unexpected ${url}`);
     });
@@ -78,9 +77,14 @@ it.each([null, JSON.stringify({ auth0UserInfo: profile, fulcraUserInfo: {} })])(
     expect(mounted).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Create Account' })).toBeNull();
-    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/auth/check'));
-    check.resolve(response({ authenticated: true }));
-    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/user/info'));
+    await waitFor(() => expect(fetcher).toHaveBeenCalledWith('/api/auth/user'));
+    check.resolve(response(profile));
+    await waitFor(() =>
+      expect(fetcher).toHaveBeenCalledWith(
+        '/api/user/info',
+        expect.objectContaining({ method: 'POST' })
+      )
+    );
     expect(mounted).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull();
     info.resolve(response({}));
@@ -89,85 +93,70 @@ it.each([null, JSON.stringify({ auth0UserInfo: profile, fulcraUserInfo: {} })])(
   }
 );
 
-it.each([false, true])(
-  'shows a restoration alert without login or children when storage throws (cached: %s)',
-  async (cached) => {
-    if (cached) {
-      localStorage.setItem(
-        'fulcraUserState',
-        JSON.stringify({ auth0UserInfo: profile, fulcraUserInfo: {} })
-      );
-    }
-    const { user } = await import('../src/lib/user.js');
-    const { get } = await import('svelte/store');
-    expect(get(user).authenticated).toBe(cached);
-    // Fail restoration writes, not store import; clearUser retries this same failure.
-    const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
-      throw new Error('Storage unavailable');
-    });
-    const check = deferred();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(() => check.promise)
-    );
-    const { default: Layout } = await import('./LayoutHarness.svelte');
-    const mounted = vi.fn();
-    render(Layout, { mounted });
-    expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.queryByText('Private feature')).toBeNull();
-    expect(mounted).not.toHaveBeenCalled();
-    expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Create Account' })).toBeNull();
-
-    check.resolve(response({ authenticated: false }));
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe(
-      'Unable to restore your session. Please reload the page to try again.'
-    );
-    expect(write).toHaveBeenCalledTimes(2);
-    expect(mounted).not.toHaveBeenCalled();
-    expect(screen.queryByText('Private feature')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Create Account' })).toBeNull();
-  }
-);
-
 it.each(['stale', 'malformed', 'invalid-shape', 'network', 'profile'])(
-  'shows login without mounting children after %s session restoration',
+  'never trusts cached profiles during %s restoration',
   async (kind) => {
     localStorage.setItem(
       'fulcraUserState',
-      kind === 'malformed'
-        ? '{invalid'
-        : JSON.stringify({
-            auth0UserInfo: kind === 'invalid-shape' ? null : profile,
-            fulcraUserInfo: {}
-          })
+      kind === 'malformed' ? '{invalid' : JSON.stringify({ auth0UserInfo: profile })
     );
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (url) => {
+      vi.fn(async () => {
         if (kind === 'network') throw new Error('offline');
-        if (url === '/api/auth/check') return response({ authenticated: kind === 'profile' });
-        return response({}, false);
+        return { ...response({}, false), status: kind === 'profile' ? 503 : 401 };
       })
     );
     const { default: Layout } = await import('./LayoutHarness.svelte');
     const mounted = vi.fn();
     render(Layout, { mounted });
-    await screen.findByRole('button', { name: 'Sign In' });
-    expect(screen.getByRole('button', { name: 'Create Account' })).toBeTruthy();
+    if (['network', 'profile'].includes(kind)) await screen.findByRole('alert');
+    else await screen.findByRole('button', { name: 'Sign In' });
     expect(mounted).not.toHaveBeenCalled();
-    expect(screen.queryByText('Private feature')).toBeNull();
-    expect(JSON.parse(localStorage.getItem('fulcraUserState') ?? '{}').auth0UserInfo).toEqual({});
+    expect(localStorage.getItem('fulcraUserState')).toBeNull();
   }
 );
+
+it('deduplicates initialization and ignores storage failures', async () => {
+  const info = deferred();
+  vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+    throw new Error('Unavailable');
+  });
+  const fetcher = vi.fn(() => info.promise);
+  vi.stubGlobal('fetch', fetcher);
+  const { user } = await import('../src/lib/user.js');
+  const first = user.init();
+  expect(user.init()).toBe(first);
+  info.resolve({ ...response({}, false), status: 401 });
+  await first;
+  const { get } = await import('svelte/store');
+  expect(get(user).status).toBe('signed-out');
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('does not let stale initialization reauthenticate after logout', async () => {
+  const info = deferred();
+  vi.spyOn(window, 'open').mockReturnValue(null);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url) => (url === '/api/auth/user' ? info.promise : Promise.resolve(response({}))))
+  );
+  const { user } = await import('../src/lib/user.js');
+  const { get } = await import('svelte/store');
+  const init = user.init();
+  const logout = user.logout();
+  expect(get(user).status).toBe('signing-out');
+  info.resolve(response(profile));
+  await Promise.all([init, logout]);
+  expect(get(user).status).toBe('signed-out');
+  expect(get(user).auth0UserInfo).toEqual({});
+});
 
 it('keeps the default document title while logged out without mounting feature children', async () => {
   document.title = '';
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => response({ authenticated: false }))
+    vi.fn(async () => ({ ...response({}, false), status: 401 }))
   );
   const { default: Layout } = await import('./LayoutHarness.svelte');
   const mounted = vi.fn();
@@ -212,7 +201,7 @@ it('does not mount children after being unmounted during restoration', async () 
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url) => {
-      if (url === '/api/auth/check') return check.promise;
+      if (url === '/api/auth/user') return check.promise;
       return response(url === '/api/auth/user' ? profile : {});
     })
   );
@@ -220,7 +209,7 @@ it('does not mount children after being unmounted during restoration', async () 
   const mounted = vi.fn();
   const view = render(Layout, { mounted });
   view.unmount();
-  check.resolve(response({ authenticated: true }));
+  check.resolve(response(profile));
   const { user } = await import('../src/lib/user.js');
   const { get } = await import('svelte/store');
   await waitFor(() => expect(get(user).init).toBe(true));
@@ -233,7 +222,7 @@ it('shows polling failures in the real login UI without mounting feature childre
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url) => {
-      if (url === '/api/auth/check') return response({ authenticated: false });
+      if (url === '/api/auth/user') return { ...response({}, false), status: 401 };
       if (url === '/api/auth/device/code') return response(device);
       return response({
         status: 400,
@@ -278,14 +267,18 @@ it.each([false, true])(
       .mockReturnValueOnce(
         blocked ? null : /** @type {Window} */ (/** @type {unknown} */ (logoutPopup))
       );
+    let loggedIn = false;
     const fetcher = vi.fn(async (url, options) => {
-      if (url === '/api/auth/check') return response({ authenticated: false });
+      if (url === '/api/auth/user')
+        return loggedIn ? response(profile) : { ...response({}, false), status: 401 };
       if (url === '/api/auth/device/code') return code.promise;
-      if (url === '/api/auth/device/token')
+      if (url === '/api/auth/device/token') {
+        loggedIn = true;
         return response({
           status: 200,
-          data: { access_token: 'access', refresh_token: 'refresh' }
+          data: {}
         });
+      }
       if (url === '/api/auth/token') return response({});
       if (url === '/api/auth/user') return response(profile);
       if (url === '/api/user/info') return response({});
@@ -316,10 +309,7 @@ it.each([false, true])(
     if (!blocked) expect(popup.location.href).toBe(device.verification_uri_complete);
     await vi.advanceTimersByTimeAsync(1000);
     expect(screen.getByText('Private feature')).toBeTruthy();
-    expect(fetcher).toHaveBeenCalledWith(
-      '/api/auth/token',
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ accessToken: 'access' }) })
-    );
+    expect(fetcher.mock.calls.some(([url]) => url === '/api/auth/token')).toBe(false);
     if (!blocked) expect(popup.close).toHaveBeenCalledOnce();
     const logout = user.logout();
     expect(open).toHaveBeenLastCalledWith(
@@ -327,23 +317,17 @@ it.each([false, true])(
       'auth0-logout',
       'width=500,height=600,left=100,top=100'
     );
+    await vi.advanceTimersByTimeAsync(0);
     const revokeIndex = fetcher.mock.calls.findIndex(([url]) => url === '/api/auth/revoke');
     expect(open.mock.invocationCallOrder[1]).toBeLessThan(
       fetcher.mock.invocationCallOrder[revokeIndex]
     );
-    expect(fetcher).toHaveBeenCalledWith(
-      '/api/auth/revoke',
-      expect.objectContaining({ body: JSON.stringify({ refreshToken: 'refresh' }) })
-    );
-    expect(fetcher).not.toHaveBeenCalledWith('/api/auth/token', { method: 'DELETE' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledWith('/api/auth/revoke', { method: 'POST' });
     revoke.resolve(response({}));
     await logout;
     await vi.advanceTimersByTimeAsync(1500);
-    expect(fetcher).toHaveBeenCalledWith('/api/auth/token', { method: 'DELETE' });
-    expect(JSON.parse(localStorage.getItem('fulcraUserState') ?? '{}')).toEqual({
-      auth0UserInfo: {},
-      fulcraUserInfo: {}
-    });
+    expect(localStorage.getItem('fulcraUserState')).toBeNull();
     expect(screen.queryByText('Private feature')).toBeNull();
     expect(screen.getByRole('button', { name: 'Sign In' })).toBeTruthy();
     if (!blocked) expect(logoutPopup.close).toHaveBeenCalledOnce();
@@ -354,7 +338,7 @@ it('shows device-flow errors and closes the popup', async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url) =>
-      response(url === '/api/auth/check' ? { authenticated: false } : {}, url === '/api/auth/check')
+      url === '/api/auth/user' ? { ...response({}, false), status: 401 } : response({}, false)
     )
   );
   const { user } = await import('../src/lib/user.js');
@@ -369,17 +353,15 @@ it('shows device-flow errors and closes the popup', async () => {
   expect(screen.getByRole('button', { name: 'Sign In' })).toBeTruthy();
 });
 
-it('polls pending and slow_down with the increased interval, then stores and clears tokens', async () => {
+it('polls pending and slow_down without receiving tokens', async () => {
   vi.useFakeTimers();
   const { Auth0DeviceFlow } = await import('../src/lib/auth0-device-flow.js');
-  const auth = new Auth0DeviceFlow({ domain: 'auth.example', clientId: 'test', audience: 'test' });
+  const auth = new Auth0DeviceFlow();
   const fetcher = vi
     .fn()
     .mockResolvedValueOnce(response({ status: 400, data: { error: 'authorization_pending' } }))
     .mockResolvedValueOnce(response({ status: 400, data: { error: 'slow_down' } }))
-    .mockResolvedValueOnce(
-      response({ status: 200, data: { access_token: 'access', refresh_token: 'refresh' } })
-    );
+    .mockResolvedValueOnce(response({ status: 200, data: {} }));
   vi.stubGlobal('fetch', fetcher);
   const poll = auth.pollForToken('device', 1);
   await vi.advanceTimersByTimeAsync(1000);
@@ -389,22 +371,17 @@ it('polls pending and slow_down with the increased interval, then stores and cle
   await vi.advanceTimersByTimeAsync(5999);
   expect(fetcher).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(1);
-  await expect(poll).resolves.toEqual({ access_token: 'access', refresh_token: 'refresh' });
+  await expect(poll).resolves.toBeUndefined();
   expect(fetcher).toHaveBeenLastCalledWith(
     '/api/auth/device/token',
     expect.objectContaining({ body: JSON.stringify({ deviceCode: 'device' }) })
   );
-  expect(await auth.getTokenSilently()).toBe('access');
-  expect(auth.getRefreshToken()).toBe('refresh');
-  await auth.logout();
-  expect(await auth.isAuthenticated()).toBe(false);
-  expect(auth.getRefreshToken()).toBeNull();
 });
 
 it.each(['denied', 'http', 'network'])('stops polling on %s errors', async (kind) => {
   vi.useFakeTimers();
   const { Auth0DeviceFlow } = await import('../src/lib/auth0-device-flow.js');
-  const auth = new Auth0DeviceFlow({ domain: 'auth.example', clientId: 'test', audience: 'test' });
+  const auth = new Auth0DeviceFlow();
   const fetcher = vi.fn(async () => {
     if (kind === 'network') throw new Error('offline');
     return response(
@@ -420,5 +397,135 @@ it.each(['denied', 'http', 'network'])('stops polling on %s errors', async (kind
   await assertion;
   await vi.advanceTimersByTimeAsync(10000);
   expect(fetcher).toHaveBeenCalledOnce();
-  expect(await auth.isAuthenticated()).toBe(false);
+  expect('tokenData' in auth).toBe(false);
 });
+
+it('waits for an in-flight login response before logout and cannot publish its profile', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(window, 'open').mockReturnValue(null);
+  const token = deferred();
+  const fetcher = vi.fn(async (url) => {
+    if (url === '/api/auth/device/code') return response(device);
+    if (url === '/api/auth/device/token') return token.promise;
+    if (url === '/api/auth/revoke') return response({ revoked: true });
+    throw new Error(`Unexpected ${url}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const { user } = await import('../src/lib/user.js');
+  const { get } = await import('svelte/store');
+  await user.startLogin(null);
+  const login = user.completeLogin('device', 1);
+  const rejected = expect(login).rejects.toThrow('Login cancelled');
+  await vi.advanceTimersByTimeAsync(1000);
+  const logout = user.logout();
+  expect(fetcher.mock.calls.some(([url]) => url === '/api/auth/revoke')).toBe(false);
+  token.resolve(response({ status: 200 }));
+  await rejected;
+  await logout;
+  expect(fetcher).toHaveBeenLastCalledWith('/api/auth/revoke', { method: 'POST' });
+  expect(get(user).status).toBe('signed-out');
+  expect(get(user).auth0UserInfo).toEqual({});
+});
+
+it('reports server logout failure without restoring local authentication', async () => {
+  vi.spyOn(window, 'open').mockReturnValue(null);
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => {
+      throw new Error('offline');
+    })
+  );
+  const { user } = await import('../src/lib/user.js');
+  const { get } = await import('svelte/store');
+  await user.logout();
+  expect(get(user).status).toBe('error');
+  expect(get(user).authenticated).toBe(false);
+  expect(get(user).message).toContain('retry sign out');
+});
+
+it('invalidates the shared session when a feature request is unauthorized', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => ({ ...response({}, false), status: 401 }))
+  );
+  const { user } = await import('../src/lib/user.js');
+  const { get } = await import('svelte/store');
+  await user.request('/api/user/preferences');
+  expect(get(user).status).toBe('signed-out');
+});
+
+it.each([401, 503])('classifies profile %s after device login like restoration', async (status) => {
+  vi.useFakeTimers();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url) => {
+      if (url === '/api/auth/device/code') return response(device);
+      if (url === '/api/auth/device/token') return response({ status: 200 });
+      return { ...response({}, false), status };
+    })
+  );
+  const { user } = await import('../src/lib/user.js');
+  const { get } = await import('svelte/store');
+  await user.startLogin(null);
+  const rejected = expect(user.completeLogin('device', 1)).rejects.toMatchObject({ status });
+  await vi.advanceTimersByTimeAsync(1000);
+  await rejected;
+  expect(get(user).status).toBe(status === 401 ? 'signed-out' : 'error');
+  expect(get(user).auth0UserInfo).toEqual({});
+});
+
+it.each(['pending', 'revoke', 'revoke-body'])(
+  'bounds %s waits, keeps old work tracked and offers visible sign-out recovery',
+  async (kind) => {
+    vi.spyOn(window, 'open').mockReturnValue(null);
+    const stuck = deferred();
+    let revokes = 0;
+    const fetcher = vi.fn(async (url) => {
+      if (url === '/api/auth/user') return response(profile);
+      if (url === '/api/user/info') return response({});
+      if (url === '/api/user/preferences') return stuck.promise;
+      if (url === '/api/auth/revoke') {
+        revokes++;
+        if (revokes === 1 && kind === 'revoke') return stuck.promise;
+        if (revokes === 1 && kind === 'revoke-body') return { ok: true, json: () => stuck.promise };
+        return response({ revoked: true });
+      }
+      throw new Error(`Unexpected ${url}`);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const { user } = await import('../src/lib/user.js');
+    const { get } = await import('svelte/store');
+    const { default: Layout } = await import('./LayoutHarness.svelte');
+    render(Layout, { mounted: vi.fn() });
+    await screen.findByText('Private feature');
+    vi.useFakeTimers();
+    if (kind === 'pending') void user.request('/api/user/preferences');
+    const logout = user.logout();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(screen.getByRole('status').textContent).toContain('Signing out');
+    expect(screen.queryByText('Private feature')).toBeNull();
+    expect(get(user).auth0UserInfo).toEqual({});
+    await vi.advanceTimersByTimeAsync(10000);
+    await logout;
+    expect(screen.getByRole('alert').textContent).toMatch(/Unable to confirm sign-out/);
+    expect(screen.getByRole('button', { name: 'Sign Out' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull();
+    await expect(user.startLogin(null)).rejects.toThrow(/Sign-out/);
+    await expect(user.request('/api/user/preferences')).rejects.toThrow(/Sign-out/);
+    const expectedRevokes = kind === 'pending' ? 0 : 1;
+    expect(revokes).toBe(expectedRevokes);
+    // Retrying while the request never settles must time out without another revoke.
+    screen.getByRole('button', { name: 'Sign Out' }).click();
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(revokes).toBe(expectedRevokes);
+    stuck.resolve(kind === 'revoke-body' ? { revoked: true } : response({ revoked: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(get(user).status).toBe('error');
+    expect(screen.queryByText('Private feature')).toBeNull();
+    screen.getByRole('button', { name: 'Sign Out' }).click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(revokes).toBe(expectedRevokes + 1);
+    expect(screen.getByRole('button', { name: 'Sign In' })).toBeTruthy();
+  }
+);

@@ -1,13 +1,14 @@
 <script>
   import { user } from '$lib/user';
 
+  /** @type {{ timezone?: string } | null} */
   let preferences = $state(null);
   let loadingPreferences = $state(false);
 
   async function fetchPreferences() {
     loadingPreferences = true;
     try {
-      const response = await fetch('/api/user/preferences');
+      const response = await user.request('/api/user/preferences');
       if (response.ok) {
         preferences = await response.json();
       } else {
