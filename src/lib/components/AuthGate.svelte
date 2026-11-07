@@ -5,32 +5,18 @@
 
   /** @type {{ children: import('svelte').Snippet }} */
   let { children } = $props();
-  // Persisted user info is not proof of a valid server session.
-  let restored = $state(false);
-  let restorationFailed = $state(false);
-
   onMount(() => {
-    let active = true;
-    user
-      .init()
-      .then(() => {
-        if (active) restored = true;
-      })
-      .catch(() => {
-        if (active) restorationFailed = true;
-      });
-    return () => {
-      active = false;
-    };
+    void user.init();
   });
 </script>
 
-{#if restorationFailed}
-  <p role="alert">Unable to restore your session. Please reload the page to try again.</p>
-{:else if restored}
-  {#if $user.authenticated}
-    {@render children()}
-  {:else}
-    <LoginDeviceFlow />
-  {/if}
+{#if $user.status === 'signing-out'}
+  <p role="status">Signing out… Waiting for outstanding requests and server confirmation.</p>
+{:else if $user.status === 'error'}
+  <p role="alert">{$user.message}</p>
+  <button onclick={() => user.logout()}>Sign Out</button>
+{:else if $user.status === 'authenticated'}
+  {@render children()}
+{:else if $user.status === 'signed-out'}
+  <LoginDeviceFlow />
 {/if}

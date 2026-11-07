@@ -8,18 +8,25 @@
  * Fulcra REST API documentation: https://docs.fulcradynamics.com/rest-api/
  */
 export class FulcraAPI {
-  constructor(apiEndpoint, accessToken) {
+  /** @param {string} apiEndpoint @param {string | undefined} accessToken @param {typeof fetch} [transport] */
+  constructor(apiEndpoint, accessToken, transport = fetch) {
     this.apiEndpoint = apiEndpoint;
     this.accessToken = accessToken;
+    this.transport = transport;
   }
 
   /**
    * Low-level HTTP request method
    * @private
+   * @param {string} method
+   * @param {string} path
+   * @param {unknown} [data]
+   * @param {AbortSignal} [signal]
    */
   async request(method, path, data, signal) {
     const url = `${this.apiEndpoint}${path}`;
 
+    /** @type {RequestInit} */
     const options = {
       signal,
       method,
@@ -33,7 +40,7 @@ export class FulcraAPI {
       options.body = JSON.stringify(data);
     }
 
-    const response = await fetch(url, options);
+    const response = await this.transport(url, options);
 
     if (!response.ok) {
       throw new Error(`API request failed: ${response.status} ${response.statusText}`);
@@ -47,18 +54,22 @@ export class FulcraAPI {
   }
 
   // Low-level HTTP methods
+  /** @param {string} path @param {AbortSignal} [signal] */
   async get(path, signal) {
     return this.request('GET', path, undefined, signal);
   }
 
+  /** @param {string} path @param {unknown} data */
   async post(path, data) {
     return this.request('POST', path, data);
   }
 
+  /** @param {string} path @param {unknown} data */
   async put(path, data) {
     return this.request('PUT', path, data);
   }
 
+  /** @param {string} path */
   async delete(path) {
     return this.request('DELETE', path);
   }

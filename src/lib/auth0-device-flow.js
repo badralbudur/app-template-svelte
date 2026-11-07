@@ -9,17 +9,10 @@
  * 2. Display verification URL and user code to user
  * 3. User visits URL on any device and enters code
  * 4. Poll Auth0 until user completes authentication
- * 5. Receive access token
+ * 5. Server stores tokens in HTTP-only cookies; browser receives success only
  */
 
 export class Auth0DeviceFlow {
-  constructor({ domain, clientId, audience }) {
-    this.domain = domain;
-    this.clientId = clientId;
-    this.audience = audience;
-    this.tokenData = null;
-  }
-
   /**
    * Start the device authorization flow
    * Returns verification URL and user code for the user to complete auth
@@ -49,8 +42,12 @@ export class Auth0DeviceFlow {
   /**
    * Poll for token after user has been shown the verification URL
    * Uses server route to bypass CORS
+   * @param {string} deviceCode
+   * @param {number} [interval]
+   * @param {() => boolean} [isCurrent]
+   * @param {AbortSignal} [signal]
    */
-  async pollForToken(deviceCode, interval = 5) {
+  async pollForToken(deviceCode, interval = 5, isCurrent = () => true, signal) {
     const maxAttempts = 60; // 5 minutes with 5 second intervals
     let attempts = 0;
 
@@ -58,14 +55,25 @@ export class Auth0DeviceFlow {
       attempts++;
 
       // Wait for the interval before polling
-      await new Promise(resolve => setTimeout(resolve, interval * 1000));
+      await new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', done);
+          resolve(undefined);
+        };
+        const timer = setTimeout(done, interval * 1000);
+        signal?.addEventListener('abort', done, { once: true });
+        if (signal?.aborted) done();
+      });
 
+      if (!isCurrent()) throw new Error('Login cancelled');
       const response = await fetch('/api/auth/device/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deviceCode })
       });
 
+      if (!isCurrent()) throw new Error('Login cancelled');
       if (!response.ok) {
         throw new Error('Failed to poll for token');
       }
@@ -74,8 +82,7 @@ export class Auth0DeviceFlow {
 
       // Check if token request was successful
       if (result.status === 200) {
-        this.tokenData = result.data;
-        return this.tokenData;
+        return;
       }
 
       const error = result.data;
@@ -96,58 +103,5 @@ export class Auth0DeviceFlow {
     }
 
     throw new Error('Device flow timed out');
-  }
-
-  /**
-   * Get the access token
-   */
-  async getTokenSilently() {
-    if (!this.tokenData) {
-      throw new Error('Not authenticated');
-    }
-    return this.tokenData.access_token;
-  }
-
-  /**
-   * Get the refresh token, if one was issued (requires the offline_access scope).
-   * Returns null when unavailable.
-   */
-  getRefreshToken() {
-    return this.tokenData?.refresh_token ?? null;
-  }
-
-  /**
-   * Get user info from Auth0
-   */
-  async getUser() {
-    if (!this.tokenData) {
-      throw new Error('Not authenticated');
-    }
-
-    const response = await fetch(`https://${this.domain}/userinfo`, {
-      headers: {
-        Authorization: `Bearer ${this.tokenData.access_token}`
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error('Failed to get user info');
-    }
-
-    return await response.json();
-  }
-
-  /**
-   * Check if user is authenticated
-   */
-  async isAuthenticated() {
-    return this.tokenData !== null;
-  }
-
-  /**
-   * Logout (just clear local token data)
-   */
-  async logout() {
-    this.tokenData = null;
   }
 }
