@@ -95,6 +95,8 @@ This template includes Auth0 authentication out of the box, using the **Auth0 De
 4. The token is stored in an HTTP-only cookie via `/api/auth/token`
 5. Client requests hit `/api/*` server routes, which use the cookie to call the Fulcra API server-to-server
 
+While authorization is pending, the app displays a QR code, user code, and a visible sign-in URL with **Copy link** and **Open sign-in page in new tab** controls. Paste the link into your main browser or scan the QR code on another device, and keep the original app open while it waits for approval. The new-tab link does not guarantee opening the system browser. If clipboard access is denied, select and copy the displayed URL manually.
+
 ### How logout works
 
 **Sign Out** fully ends the session: it revokes the refresh token (`/api/auth/revoke`), clears the access-token cookie, wipes local state, and opens Auth0's `/v2/logout` to clear the SSO session so the next sign-in requires re-authentication.
