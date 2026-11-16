@@ -28,6 +28,7 @@ test('blocked popup shows the selectable link, QR code and user code while polli
   await fireEvent.click(screen.getByRole('button', { name: 'Sign In' }));
 
   const link = await screen.findByLabelText('Sign-in link');
+  expect(screen.getByRole('heading', { name: 'Was the popup blocked?' })).toBeTruthy();
   expect(link.textContent?.trim()).toBe(verificationInfo.verificationUri);
   expect(link.classList).toContain('select-all');
   expect(screen.getByText(verificationInfo.userCode)).toBeTruthy();
