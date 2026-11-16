@@ -119,7 +119,7 @@
 
       <div class="rounded-lg border border-solid border-fulcra-black-25 bg-[#1b1b23] p-[22px]">
         <h2 class="mb-4 text-[15px] font-medium tracking-[-0.01em]">
-          {verificationInfo ? 'Was the popup blocked?' : 'Get started'}
+          {verificationInfo ? 'Was the sign-in popup blocked?' : 'Get started'}
         </h2>
 
         {#if !verificationInfo}
